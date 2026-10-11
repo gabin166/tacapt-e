@@ -1,0 +1,287 @@
+name: Construire l'application Android
+
+# Se lance a chaque envoi sur la branche principale, et a la demande depuis
+# l'onglet « Actions » (bouton « Run workflow »).
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Recuperer le depot
+        uses: actions/checkout@v4
+
+      - name: Installer Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Installer Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Installer les outils Android
+        uses: android-actions/setup-android@v3
+
+      # Le depot ne contient que www/index.html : tout le reste du projet est
+      # fabrique ici, pour n'avoir aucun fichier technique a maintenir a la main.
+      - name: Preparer les fichiers du projet
+        run: |
+          cat > package.json <<'FIN'
+          {
+            "name": "habitudes-atomiques",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor/core": "^6.1.2",
+              "@capacitor/android": "^6.1.2",
+              "@capacitor/cli": "^6.1.2",
+              "@capacitor/local-notifications": "^6.1.0",
+              "@capacitor/filesystem": "^6.0.1",
+              "@capacitor/clipboard": "^6.0.1",
+              "@capacitor/share": "^6.0.2"
+            }
+          }
+          FIN
+          cat > capacitor.config.json <<'FIN'
+          {
+            "appId": "fr.chercheur.habitudes2026",
+            "appName": "Habitudes Atomiques",
+            "webDir": "www",
+            "android": { "allowMixedContent": true },
+            "plugins": {
+              "LocalNotifications": {
+                "smallIcon": "ic_stat_icon",
+                "iconColor": "#2e7d32"
+              }
+            }
+          }
+          FIN
+          # index.html est accepte a la racine OU dans www/ : un depot a deux
+          # fichiers suffit donc, sans avoir a creer de dossier a la main.
+          if [ -f www/index.html ]; then
+            echo "index.html trouve dans www/"
+          elif [ -f index.html ]; then
+            mkdir -p www && cp index.html www/index.html
+            echo "index.html trouve a la racine, recopie dans www/"
+          else
+            echo "::error::index.html est absent : placez-le a la racine du depot ou dans www/."
+            exit 1
+          fi
+          echo "index.html : $(du -h www/index.html | cut -f1)"
+
+      # Une sonnerie par choix propose dans l'application.
+      #
+      # Pourquoi c'est indispensable : sous Android, le son d'une notification
+      # est porte par le CANAL, et un canal ne peut pointer que vers un fichier
+      # embarque dans l'application. Les sonneries sont definies dans le code
+      # comme des notes d'oscillateur jouees par le navigateur ; sans ces
+      # fichiers, un seul son existerait et tous les groupes sonneraient pareil.
+      #
+      # Les notes ci-dessous sont celles de ALARM_SOUNDS dans le code : ce qu'on
+      # entend en choisissant une sonnerie est donc ce qui sonnera reellement.
+      - name: Fabriquer les sonneries
+        run: |
+          cat > sonneries.py <<'FIN'
+          import math, os, struct, sys, wave
+
+          TAUX = 22050        # la note la plus aigue est a 2093 Hz : largement suffisant
+          DUREE_CIBLE = 4.0   # s : une alarme doit durer assez pour etre remarquee
+          PAUSE = 0.35        # s entre deux repetitions du motif
+          CRETE = 0.86        # amplitude finale, volontairement forte
+
+          SONNERIES = [
+              ("bip",      "sine",     [(880, 0, 0.5)]),
+              ("double",   "sine",     [(880, 0, 0.18), (880, 0.28, 0.18)]),
+              ("triple",   "square",   [(988, 0, 0.12), (988, 0.2, 0.12), (988, 0.4, 0.12)]),
+              ("reveil",   "square",   [(1046, 0, 0.09), (1046, 0.16, 0.09), (1046, 0.32, 0.09),
+                                        (1046, 0.48, 0.09), (1046, 0.64, 0.09)]),
+              ("carillon", "sine",     [(659, 0, 0.5), (784, 0.18, 0.5), (988, 0.36, 0.9)]),
+              ("cloche",   "sine",     [(523, 0, 1.6), (1046, 0, 1.1), (1568, 0, 0.6), (2093, 0, 0.35)]),
+              ("montee",   "sine",     [(440, 0, 0.22), (554, 0.16, 0.22), (659, 0.32, 0.22), (880, 0.48, 0.6)]),
+              ("descente", "sine",     [(880, 0, 0.22), (659, 0.16, 0.22), (554, 0.32, 0.22), (440, 0.48, 0.6)]),
+              ("arpege",   "triangle", [(523, 0, 0.3), (659, 0.12, 0.3), (784, 0.24, 0.3),
+                                        (1046, 0.36, 0.5), (784, 0.5, 0.4)]),
+              ("fanfare",  "square",   [(523, 0, 0.16), (659, 0.14, 0.16), (784, 0.28, 0.45)]),
+              ("marimba",  "triangle", [(698, 0, 0.22), (1046, 0.13, 0.3)]),
+              ("goutte",   "sine",     [(1319, 0, 0.1), (880, 0.06, 0.35)]),
+              ("sonar",    "sine",     [(1200, 0, 1.4)]),
+              ("alerte",   "sawtooth", [(740, 0, 0.2), (587, 0.2, 0.2), (740, 0.4, 0.2), (587, 0.6, 0.3)]),
+              ("doux",     "sine",     [(392, 0, 1.5), (494, 0.1, 1.4), (587, 0.2, 1.3)]),
+              ("grave",    "triangle", [(165, 0, 1.2), (330, 0, 1.2), (495, 0, 0.9)]),
+              ("muet",     "sine",     []),
+          ]
+
+          def echantillon(forme, phase):
+              t = phase % 1.0
+              if forme == "sine":     return math.sin(2 * math.pi * t)
+              if forme == "square":   return 1.0 if t < 0.5 else -1.0
+              if forme == "triangle": return 4 * t - 1 if t < 0.5 else 3 - 4 * t
+              if forme == "sawtooth": return 2 * t - 1
+              raise ValueError(forme)
+
+          def motif(forme, notes):
+              fin = max(d + du for _, d, du in notes)
+              n = int((fin + 0.05) * TAUX)
+              buf = [0.0] * n
+              for freq, delai, duree in notes:
+                  i0 = int(delai * TAUX)
+                  for i in range(int(duree * TAUX)):
+                      idx = i0 + i
+                      if idx >= n: break
+                      t = i / TAUX
+                      attaque = min(1.0, t / 0.015) if t < 0.015 else 1.0
+                      buf[idx] += echantillon(forme, freq * t) * attaque * math.exp(-3.2 * (t / duree))
+              return buf
+
+          dossier = sys.argv[1] if len(sys.argv) > 1 else "."
+          os.makedirs(dossier, exist_ok=True)
+          os.chdir(dossier)
+          for nom, forme, notes in SONNERIES:
+              if not notes:
+                  # « Silencieux » : fichier reellement muet. Il permet de garder
+                  # l'importance maximale du canal — donc la vibration et la
+                  # banniere sur l'ecran verrouille — sans aucun son.
+                  buf = [0] * int(1.0 * TAUX)
+              else:
+                  un = motif(forme, notes)
+                  c = max(abs(v) for v in un) or 1.0
+                  un = [v / c for v in un]
+                  pause = [0.0] * int(PAUSE * TAUX)
+                  piste = []
+                  while len(piste) / TAUX < DUREE_CIBLE:
+                      piste.extend(un); piste.extend(pause)
+                  piste = piste[: int(DUREE_CIBLE * TAUX)]
+                  buf = [max(-32767, min(32767, int(v * CRETE * 32767))) for v in piste]
+              with wave.open(f"alarme_{nom}.wav", "wb") as w:
+                  w.setnchannels(1); w.setsampwidth(2); w.setframerate(TAUX)
+                  w.writeframes(b"".join(struct.pack("<h", v) for v in buf))
+              print(f"  alarme_{nom}.wav — {len(buf) / TAUX:.2f} s")
+          print(f"{len(SONNERIES)} sonneries fabriquees.")
+          FIN
+          mkdir -p sons
+          python3 sonneries.py sons
+          # Garde-fou : une sonnerie manquante donnerait un canal muet.
+          n=$(ls sons/alarme_*.wav | wc -l)
+          test "$n" -eq 17 || { echo "::error::$n sonneries fabriquees au lieu de 17."; exit 1; }
+
+      # La cle de signature doit rester LA MEME d'une version a l'autre :
+      # Android refuse d'installer une mise a jour signee differemment, et il
+      # faudrait desinstaller l'application — donc perdre ses donnees.
+      - name: Preparer la cle de signature
+        id: cle
+        run: |
+          mkdir -p ~/.android
+          if [ -f debug.keystore.b64 ]; then
+            base64 -d debug.keystore.b64 > ~/.android/debug.keystore
+            echo "neuve=non" >> $GITHUB_OUTPUT
+            echo "Cle de signature du depot reutilisee : les mises a jour s'installeront par-dessus."
+          else
+            echo "neuve=oui" >> $GITHUB_OUTPUT
+            echo "::warning::debug.keystore.b64 est absent du depot. Une cle neuve est fabriquee."
+            echo "::warning::Recuperez le fichier 'cle-de-signature' dans les artefacts et ajoutez-le au depot,"
+            echo "::warning::sinon chaque build produira une signature differente et les mises a jour seront refusees."
+            keytool -genkey -v -keystore ~/.android/debug.keystore \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            base64 -w0 ~/.android/debug.keystore > debug.keystore.b64
+          fi
+
+      - name: Installer les dependances
+        run: npm install --no-audit --no-fund
+
+      - name: Fabriquer le projet Android
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      # Un numero de version different a chaque build : sans cela, Android
+      # considere l'APK comme identique et n'installe rien.
+      - name: Numeroter la version
+        run: |
+          python3 - <<'FIN'
+          import re, sys
+          p = "android/app/build.gradle"
+          s = open(p).read()
+          s, n = re.subn(r"versionCode\s+\d+", "versionCode ${{ github.run_number }}", s, count=1)
+          if n != 1:
+              sys.exit(f"::error::versionCode introuvable dans {p}")
+          open(p, "w").write(s)
+          print("versionCode = ${{ github.run_number }}")
+          FIN
+
+      # res/raw : seul emplacement ou un canal de notification sait lire un son.
+      - name: Embarquer les sonneries
+        run: |
+          mkdir -p android/app/src/main/res/raw
+          cp sons/alarme_*.wav android/app/src/main/res/raw/
+          echo "Sonneries embarquees :"
+          ls -1 android/app/src/main/res/raw/
+
+      # Sans ces autorisations, Android differe les alarmes au prochain reveil
+      # de l'ecran — exactement le symptome « ca ne vibre que quand j'allume ».
+      - name: Autoriser les alarmes
+        run: |
+          python3 - <<'FIN'
+          import sys
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = open(p).read()
+          perms = [
+              "android.permission.SCHEDULE_EXACT_ALARM",
+              "android.permission.USE_EXACT_ALARM",
+              "android.permission.POST_NOTIFICATIONS",
+              "android.permission.RECEIVE_BOOT_COMPLETED",
+              "android.permission.VIBRATE",
+          ]
+          ajout = "".join(f'    <uses-permission android:name="{x}" />\n'
+                          for x in perms if x not in s)
+          if ajout:
+              i = s.index("<application")
+              s = s[:i] + ajout + s[i:]
+              open(p, "w").write(s)
+          manque = [x for x in perms if x not in open(p).read()]
+          if manque:
+              sys.exit("::error::autorisations absentes : " + ", ".join(manque))
+          print("Autorisations en place :\n  " + "\n  ".join(perms))
+          FIN
+
+      - name: Compiler l'APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Recapitulatif
+        run: |
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$apk" || { echo "::error::APK introuvable."; exit 1; }
+          echo "### Application construite" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Taille : $(du -h "$apk" | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "- Version : ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Sonneries embarquees : $(ls -1 android/app/src/main/res/raw/alarme_*.wav | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Telechargez **HabitudesAtomiques-apk** plus bas sur cette page." >> $GITHUB_STEP_SUMMARY
+
+      - name: Publier l'application
+        uses: actions/upload-artifact@v4
+        with:
+          name: HabitudesAtomiques-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      # Publie uniquement si la cle a du etre fabriquee : a ajouter au depot.
+      - name: Publier la cle de signature neuve
+        if: steps.cle.outputs.neuve == 'oui'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cle-de-signature
+          path: debug.keystore.b64
+          retention-days: 90
