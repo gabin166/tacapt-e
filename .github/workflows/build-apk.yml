@@ -26,8 +26,28 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Installer les outils Android
-        uses: android-actions/setup-android@v3
+      # Le SDK Android est DEJA installe sur les machines GitHub, licences
+      # acceptees. L'action android-actions/setup-android le remplacait par des
+      # outils plus recents dont les licences, elles, ne sont pas acceptees :
+      # elle posait alors la question « Review licenses (y/N)? » a un serveur
+      # ou personne ne repond, et la construction mourait la. On se contente
+      # donc du SDK fourni, ce qui supprime la panne et fait gagner du temps.
+      - name: Verifier le SDK Android
+        run: |
+          : "${ANDROID_HOME:=${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          if [ ! -d "$ANDROID_HOME/platforms" ] && [ ! -d "$ANDROID_HOME/platform-tools" ]; then
+            echo "::error::SDK Android introuvable dans $ANDROID_HOME."
+            exit 1
+          fi
+          # Acceptation silencieuse, sans jamais bloquer : si tout est deja
+          # accepte, la commande ne fait rien. Le « || true » garantit que
+          # cette etape ne peut pas faire echouer la construction.
+          sdk="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$sdk" ] && yes 2>/dev/null | "$sdk" --licenses >/dev/null 2>&1 || true
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "SDK Android pret."
 
       # Le depot ne contient que www/index.html : tout le reste du projet est
       # fabrique ici, pour n'avoir aucun fichier technique a maintenir a la main.
